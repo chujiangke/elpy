@@ -1,6 +1,6 @@
 ;;; elpy-profile.el --- Profiling capabilitiss for elpy
 
-;; Copyright (C) 2013-2016  Jorgen Schaefer
+;; Copyright (C) 2013-2019  Jorgen Schaefer
 
 ;; Author: Gaby Launay <gaby.launay@tutanota.com>
 ;; URL: https://github.com/jorgenschaefer/elpy
@@ -30,7 +30,10 @@
 
 (defcustom elpy-profile-visualizer "snakeviz"
   "Visualizer for elpy profile results."
-  :type 'str
+  :type '(choice (const :tag "Snakeviz" "snakeviz")
+                 (const :tag "RunSnakeRun" "runsnake")
+                 (const :tag "pyprof2calltree" "pyprof2calltree -k -i")
+                 (string :tag "Other"))
   :group 'elpy)
 
 ;;;;;;;;;;;;;;;;;;;;;;
@@ -56,7 +59,7 @@
           (message  "[%s] Profiling failed" filename)
           (display-buffer  "*elpy-profile-log*"))
       (message  "[%s] Profiling succeeded" filename)
-      (when (not dont-display)
+      (unless dont-display
         (elpy-profile--display-profiling prof-file)))))
 
 (defun elpy-profile--file (file &optional in-dir dont-display)
@@ -71,7 +74,7 @@ If DONT-DISPLAY is non nil, don't display the profile results."
                         (concat (file-name-sans-extension file) ".profile")
                       (concat (make-temp-file "elpy-profile-" nil ".profile"))))
          (proc-name (format "elpy-profile-%s" file))
-         (proc-cmd (list python-shell-interpreter "-m" "cProfile" "-o" prof-file file))
+         (proc-cmd (list elpy-rpc-python-command "-m" "cProfile" "-o" prof-file file))
          (proc (make-process :name proc-name
                              :buffer "*elpy-profile-log*"
                              :sentinel 'elpy-profile--sentinel
@@ -101,7 +104,7 @@ If DONT-DISPLAY is non nil, don't display the profile results."
          (tmp-file (if in-dir
                        (concat file-dir "/" tmp-file-prefix file-name)
                      (concat (make-temp-file "elpy-profile-" t)  "/" tmp-file-prefix file-name)))
-         (region (elpy-shell--region-without-indentation beg end)))
+         (region (python-shell-buffer-substring beg end)))
     (with-temp-buffer
       (insert region)
       (write-region (point-min) (point-max) tmp-file nil t))

@@ -8,6 +8,7 @@ https://github.com/davidhalter/jedi
 
 import sys
 import traceback
+import re
 
 import jedi
 
@@ -24,8 +25,12 @@ class JediBackend(object):
     """
     name = "jedi"
 
-    def __init__(self, project_root):
+    def __init__(self, project_root, environment_binaries_path):
         self.project_root = project_root
+        self.environment = None
+        if environment_binaries_path is not None:
+            self.environment = jedi.create_environment(environment_binaries_path,
+                                                       safe=False)
         self.completions = {}
         sys.path.append(project_root)
 
@@ -33,7 +38,8 @@ class JediBackend(object):
         line, column = pos_to_linecol(source, offset)
         proposals = run_with_debug(jedi, 'completions',
                                    source=source, line=line, column=column,
-                                   path=filename, encoding='utf-8')
+                                   path=filename, encoding='utf-8',
+                                   environment=self.environment)
         if proposals is None:
             return []
         self.completions = dict((proposal.name, proposal)
@@ -62,8 +68,15 @@ class JediBackend(object):
         line, column = pos_to_linecol(source, offset)
         locations = run_with_debug(jedi, 'goto_definitions',
                                    source=source, line=line, column=column,
-                                   path=filename, encoding='utf-8')
-        if locations and locations[-1].docstring():
+                                   path=filename, encoding='utf-8',
+                                   environment=self.environment)
+        if not locations:
+            return None
+        # Filter uninteresting things
+        if locations[-1].name in ["str", "int", "float", "bool", "tuple",
+                                  "list", "dict"]:
+            return None
+        if locations[-1].docstring():
             return ('Documentation for {0}:\n\n'.format(
                 locations[-1].full_name) + locations[-1].docstring())
         else:
@@ -73,18 +86,22 @@ class JediBackend(object):
         line, column = pos_to_linecol(source, offset)
         locations = run_with_debug(jedi, 'goto_definitions',
                                    source=source, line=line, column=column,
-                                   path=filename, encoding='utf-8')
+                                   path=filename, encoding='utf-8',
+                                   environment=self.environment)
         # goto_definitions() can return silly stuff like __builtin__
         # for int variables, so we fall back on goto() in those
         # cases. See issue #76.
         if (
                 locations and
-                locations[0].module_path is None
+                (locations[0].module_path is None
+                 or locations[0].module_name == 'builtins'
+                 or locations[0].module_name == '__builtin__')
         ):
             locations = run_with_debug(jedi, 'goto_assignments',
                                        source=source, line=line,
                                        column=column,
-                                       path=filename, encoding='utf-8')
+                                       path=filename, encoding='utf-8',
+                                       environment=self.environment)
         if not locations:
             return None
         else:
@@ -110,7 +127,9 @@ class JediBackend(object):
         line, column = pos_to_linecol(source, offset)
         locations = run_with_debug(jedi, 'goto_assignments',
                                    source=source, line=line, column=column,
-                                   path=filename, encoding='utf-8')
+                                   path=filename, encoding='utf-8',
+                                   environment=self.environment)
+
         if not locations:
             return None
         else:
@@ -136,16 +155,118 @@ class JediBackend(object):
         line, column = pos_to_linecol(source, offset)
         calls = run_with_debug(jedi, 'call_signatures',
                                source=source, line=line, column=column,
-                               path=filename, encoding='utf-8')
+                               path=filename, encoding='utf-8',
+                               environment=self.environment)
         if calls:
             call = calls[0]
         else:
             call = None
         if not call:
             return None
+        # Strip 'param' added by jedi at the beginning of
+        # parameter names. Should be unecessary for jedi > 0.13.0
+        params = [re.sub("^param ", '', param.description)
+                  for param in call.params]
         return {"name": call.name,
                 "index": call.index,
-                "params": [param.description for param in call.params]}
+                "params": params}
+
+    def rpc_get_calltip_or_oneline_docstring(self, filename, source, offset):
+        """
+        Return the current function calltip or its oneline docstring.
+
+        Meant to be used with eldoc.
+        """
+        # Try to get a oneline docstring then
+        docs = self.rpc_get_oneline_docstring(filename=filename,
+                                              source=source,
+                                              offset=offset)
+        if docs is not None:
+            if docs['doc'] != "No documentation":
+                docs['kind'] = 'oneline_doc'
+                return docs
+        # Try to get a calltip
+        calltip = self.rpc_get_calltip(filename=filename, source=source,
+                                       offset=offset)
+        if calltip is not None:
+            calltip['kind'] = 'calltip'
+            return calltip
+        # Ok, no calltip, just display the function name
+        if docs is not None:
+            docs['kind'] = 'oneline_doc'
+            return docs
+        # Giving up...
+        return None
+
+    def rpc_get_oneline_docstring(self, filename, source, offset):
+        """Return a oneline docstring for the symbol at offset"""
+        line, column = pos_to_linecol(source, offset)
+        definitions = run_with_debug(jedi, 'goto_definitions',
+                                     source=source, line=line, column=column,
+                                     path=filename, encoding='utf-8',
+                                     environment=self.environment)
+        # avoid unintersting stuff
+        try:
+            if definitions[0].name in ["str", "int", "float", "bool", "tuple",
+                                       "list", "dict"]:
+                return None
+        except:
+            pass
+        assignments = run_with_debug(jedi, 'goto_assignments',
+                                     source=source, line=line, column=column,
+                                     path=filename, encoding='utf-8',
+                                     environment=self.environment)
+
+        if definitions:
+            definition = definitions[0]
+        else:
+            definition = None
+        if assignments:
+            assignment = assignments[0]
+        else:
+            assignment = None
+        if definition:
+            # Get name
+            if definition.type in ['function', 'class']:
+                raw_name = definition.name
+                name = '{}()'.format(raw_name)
+                doc = definition.docstring().split('\n')
+            elif definition.type in ['module']:
+                raw_name = definition.name
+                name = '{} {}'.format(raw_name, definition.type)
+                doc = definition.docstring().split('\n')
+            elif (definition.type in ['instance']
+                  and hasattr(assignment, "name")):
+                raw_name = assignment.name
+                name = raw_name
+                doc = assignment.docstring().split('\n')
+            else:
+                return None
+            # Keep only the first paragraph that is not a function declaration
+            lines = []
+            call = "{}(".format(raw_name)
+            # last line
+            doc.append('')
+            for i in range(len(doc)):
+                if doc[i] == '' and len(lines) != 0:
+                    paragraph = " ".join(lines)
+                    lines = []
+                    if call != paragraph[0:len(call)]:
+                        break
+                    paragraph = ""
+                    continue
+                lines.append(doc[i])
+            # Keep only the first sentence
+            onelinedoc = paragraph.split('. ', 1)
+            if len(onelinedoc) == 2:
+                onelinedoc = onelinedoc[0] + '.'
+            else:
+                onelinedoc = onelinedoc[0]
+            if onelinedoc == '':
+                onelinedoc = "No documentation"
+            return {"name": name,
+                    "doc": onelinedoc}
+        return None
 
     def rpc_get_usages(self, filename, source, offset):
         """Return the uses of the symbol at offset.
@@ -157,7 +278,8 @@ class JediBackend(object):
         line, column = pos_to_linecol(source, offset)
         uses = run_with_debug(jedi, 'usages',
                               source=source, line=line, column=column,
-                              path=filename, encoding='utf-8')
+                              path=filename, encoding='utf-8',
+                              environment=self.environment)
         if uses is None:
             return None
         result = []

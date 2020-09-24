@@ -13,6 +13,7 @@ from elpy.pydocutils import get_pydoc_completions
 from elpy.rpc import JSONRPCServer, Fault
 from elpy.auto_pep8 import fix_code
 from elpy.yapfutil import fix_code as fix_code_with_yapf
+from elpy.blackutil import fix_code as fix_code_with_black
 
 
 try:
@@ -53,9 +54,10 @@ class ElpyRPCServer(JSONRPCServer):
 
     def rpc_init(self, options):
         self.project_root = options["project_root"]
+        self.env = options["environment"]
 
         if jedibackend:
-            self.backend = jedibackend.JediBackend(self.project_root)
+            self.backend = jedibackend.JediBackend(self.project_root, self.env)
         else:
             self.backend = None
 
@@ -68,6 +70,21 @@ class ElpyRPCServer(JSONRPCServer):
 
         """
         return self._call_backend("rpc_get_calltip", None, filename,
+                                  get_source(source), offset)
+
+    def rpc_get_oneline_docstring(self, filename, source, offset):
+        """Get a oneline docstring for the symbol at the offset.
+
+        """
+        return self._call_backend("rpc_get_oneline_docstring", None, filename,
+                                  get_source(source), offset)
+
+    def rpc_get_calltip_or_oneline_docstring(self, filename, source, offset):
+        """Get a calltip or a oneline docstring for the symbol at the offset.
+
+        """
+        return self._call_backend("rpc_get_calltip_or_oneline_docstring",
+                                  None, filename,
                                   get_source(source), offset)
 
     def rpc_get_completions(self, filename, source, offset):
@@ -199,19 +216,26 @@ class ElpyRPCServer(JSONRPCServer):
             raise Fault("get_names not implemented by current backend",
                         code=400)
 
-    def rpc_fix_code(self, source):
+    def rpc_fix_code(self, source, directory):
         """Formats Python code to conform to the PEP 8 style guide.
 
         """
         source = get_source(source)
-        return fix_code(source)
+        return fix_code(source, directory)
 
-    def rpc_fix_code_with_yapf(self, source):
+    def rpc_fix_code_with_yapf(self, source, directory):
         """Formats Python code to conform to the PEP 8 style guide.
 
         """
         source = get_source(source)
-        return fix_code_with_yapf(source)
+        return fix_code_with_yapf(source, directory)
+
+    def rpc_fix_code_with_black(self, source, directory):
+        """Formats Python code to conform to the PEP 8 style guide.
+
+        """
+        source = get_source(source)
+        return fix_code_with_black(source, directory)
 
 
 def get_source(fileobj):
